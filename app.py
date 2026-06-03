@@ -192,7 +192,7 @@ def movie_cards(recs, api_key):
         with cols[i % 5]:
             poster = get_poster(row["title"], api_key)
             if poster:
-                st.image(poster, width="stretch")
+                st.image(poster, width=250)
             else:
                 st.markdown(
                     "<div style='background:#1e1e1e;height:240px;border-radius:8px;"
