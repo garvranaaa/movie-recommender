@@ -8,7 +8,7 @@ An interactive movie recommendation web app built with Python and Streamlit. Pow
 
 ## Demo
 
-![App Demo](app_demo.png)
+![App Demo](demo.png)
 
 ---
 
