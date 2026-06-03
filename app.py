@@ -29,9 +29,18 @@ def download_data():
     if not os.path.exists("ml-latest-small"):
         with st.spinner("Rewinding the tape... Downloading the RetroReel Database..."):
             url = "https://files.grouplens.org/datasets/movielens/ml-latest-small.zip"
-            urllib.request.urlretrieve(url, "ml-latest-small.zip")
+            
+            # requests is more reliable than urlretrieve on Streamlit Cloud
+            r = requests.get(url, stream=True, timeout=60)
+            r.raise_for_status()
+            
+            with open("ml-latest-small.zip", "wb") as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            
             with zipfile.ZipFile("ml-latest-small.zip", "r") as z:
                 z.extractall(".")
+            
             os.remove("ml-latest-small.zip")
 
 
@@ -234,6 +243,20 @@ download_data()
 
 with st.spinner("Dusting off the archives and loading data..."):
     ratings, movies, ratings_matrix, movies_genres_set, rating_stats = load_data()
+
+# ── Page Title ────────────────────────────────────────────────────────────────
+st.markdown("""
+    <div style='text-align:center; padding: 1.5rem 0 0.5rem 0;'>
+        <h1 style='font-size:3rem; margin-bottom:0;'>📼 RetroReel</h1>
+        <p style='font-size:1.1rem; color:#888; margin-top:0.3rem;'>
+            Nostalgic Movie Recommendations · 9,742 films · up to 2018
+        </p>
+        <hr style='border-color:#333; margin-top:1rem;'>
+    </div>
+""", unsafe_allow_html=True)
+
+tab1, tab2, tab3 = st.tabs(["🎯 Similar Classics", "👤 Your Nostalgic Taste", "ℹ️ Archive Blueprint"])
+
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 
