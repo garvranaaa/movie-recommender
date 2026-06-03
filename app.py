@@ -10,10 +10,8 @@ import pandas as pd
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 import requests
-import urllib.request
 import zipfile
 
-# Retro / Nostalgia Page Configuration
 st.set_page_config(page_title="RetroReel Archive", page_icon="📼", layout="wide")
 
 GENRES = [
@@ -29,18 +27,13 @@ def download_data():
     if not os.path.exists("ml-latest-small"):
         with st.spinner("Rewinding the tape... Downloading the RetroReel Database..."):
             url = "https://files.grouplens.org/datasets/movielens/ml-latest-small.zip"
-            
-            # requests is more reliable than urlretrieve on Streamlit Cloud
             r = requests.get(url, stream=True, timeout=60)
             r.raise_for_status()
-            
             with open("ml-latest-small.zip", "wb") as f:
                 for chunk in r.iter_content(chunk_size=8192):
                     f.write(chunk)
-            
             with zipfile.ZipFile("ml-latest-small.zip", "r") as z:
                 z.extractall(".")
-            
             os.remove("ml-latest-small.zip")
 
 
@@ -54,25 +47,21 @@ def load_data():
         "ml-latest-small/movies.csv"
     ).rename(columns={"movieId": "movie_id"})
 
-    # One-hot encode genres dynamically
     for g in GENRES:
         movies_raw[g] = movies_raw["genres"].apply(lambda x: 1 if g in str(x).split("|") else 0)
 
     movies = movies_raw[["movie_id", "title"] + GENRES]
 
-    # Sparse user-movie matrix
     ratings_matrix = ratings.pivot_table(
         index="user_id", columns="movie_id", values="rating"
     ).fillna(0)
 
-    # Genre lookup index
     movies_genres_set = movies.set_index("movie_id")[GENRES]
-
     rating_stats = ratings.groupby("movie_id")["rating"].agg(["mean", "count"])
 
     return ratings, movies, ratings_matrix, movies_genres_set, rating_stats
 
-# ── Recommenders (Optimized Dynamic Engine to prevent crashes) ───────────────
+# ── Recommenders ──────────────────────────────────────────────────────────────
 
 def get_hybrid_recs(movie_id, ratings_matrix, movies_genres_set, movies, rating_stats, n=10):
     if movie_id not in movies_genres_set.index:
@@ -82,7 +71,7 @@ def get_hybrid_recs(movie_id, ratings_matrix, movies_genres_set, movies, rating_
     all_genre_vecs = movies_genres_set.to_numpy()
     content_sims = cosine_similarity(movie_genre_vec, all_genre_vecs).flatten()
     content = pd.Series(content_sims, index=movies_genres_set.index).drop(movie_id, errors='ignore')
-    
+
     if movie_id in ratings_matrix.columns:
         movie_collab_vec = ratings_matrix[movie_id].to_numpy().reshape(1, -1)
         all_collab_vecs = ratings_matrix.to_numpy().T
@@ -99,7 +88,7 @@ def get_hybrid_recs(movie_id, ratings_matrix, movies_genres_set, movies, rating_
 
     collab_n = norm(collab)
     content_n = norm(content).reindex(collab_n.index, fill_value=0)
-    
+
     if movie_id in ratings_matrix.columns:
         hybrid = (0.6 * collab_n + 0.4 * content_n).sort_values(ascending=False).head(n * 2)
     else:
@@ -107,15 +96,10 @@ def get_hybrid_recs(movie_id, ratings_matrix, movies_genres_set, movies, rating_
 
     recs = movies[movies["movie_id"].isin(hybrid.index)].copy()
     recs["score"] = recs["movie_id"].map(hybrid)
-
     recs = recs.merge(rating_stats, left_on="movie_id", right_index=True, how="left")
     recs["count"] = recs["count"].fillna(0)
     recs["mean"] = recs["mean"].fillna(3.0)
-
-    recs["score"] *= (
-        (1 + np.log1p(recs["count"]) * 0.05)
-        * (recs["mean"] / 5)
-    )
+    recs["score"] *= (1 + np.log1p(recs["count"]) * 0.05) * (recs["mean"] / 5)
 
     return recs.sort_values("score", ascending=False).head(n)
 
@@ -124,40 +108,31 @@ def get_user_recs(ratings_dict, ratings_matrix, movies, rating_stats, n=10):
     if not ratings_dict:
         return pd.DataFrame()
 
-    rated_ids = list(ratings_dict.keys())
-    # Ensure selected IDs are strictly inside our ratings matrix columns
-    valid_rated_ids = [mid for mid in rated_ids if mid in ratings_matrix.columns]
-    
+    valid_rated_ids = [mid for mid in ratings_dict if mid in ratings_matrix.columns]
     if not valid_rated_ids:
         return pd.DataFrame()
 
     rated_series = pd.Series({mid: ratings_dict[mid] for mid in valid_rated_ids})
-    all_movie_ids = ratings_matrix.columns
-    unrated = [mid for mid in all_movie_ids if mid not in valid_rated_ids]
-
+    unrated = [mid for mid in ratings_matrix.columns if mid not in valid_rated_ids]
     if not unrated:
         return pd.DataFrame()
 
-    # Optimized dynamic item-item calculations based on new user profile
     rated_vectors = ratings_matrix[valid_rated_ids].to_numpy().T
     unrated_vectors = ratings_matrix[unrated].to_numpy().T
-    
     sim_matrix = cosine_similarity(rated_vectors, unrated_vectors)
     ratings_arr = rated_series.to_numpy().reshape(-1, 1)
-    
     scores_arr = (sim_matrix * ratings_arr).sum(axis=0)
     sim_sums_arr = np.abs(sim_matrix).sum(axis=0) + 1e-8
     norm_scores = scores_arr / sim_sums_arr
-    
+
     scores_s = pd.Series(norm_scores, index=unrated).sort_values(ascending=False).head(n * 2)
-    
     recs = movies[movies["movie_id"].isin(scores_s.index)].copy()
     recs["score"] = recs["movie_id"].map(scores_s)
     recs = recs.merge(rating_stats[["count"]], left_on="movie_id", right_index=True, how="left")
 
     return recs.sort_values("score", ascending=False).head(n)
 
-# ── TMDB Poster Downloader ───────────────────────────────────────────────────
+# ── TMDB ──────────────────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=86400)
 def get_poster(title, api_key):
@@ -165,7 +140,6 @@ def get_poster(title, api_key):
         return None
     try:
         clean = title.split("(")[0].strip()
-        
         if ", The" in clean:
             clean = "The " + clean.replace(", The", "").strip()
         elif ", A" in clean:
@@ -180,8 +154,7 @@ def get_poster(title, api_key):
 
         r = requests.get(
             "https://api.themoviedb.org/3/search/movie",
-            params=params,
-            timeout=5
+            params=params, timeout=5
         )
         results = r.json().get("results", [])
         if results and results[0].get("poster_path"):
@@ -214,9 +187,8 @@ def movie_cards(recs, api_key):
             if genres:
                 st.caption(", ".join(genres[:3]))
 
-# ── Sidebar & Secrets ─────────────────────────────────────────────────────────
+# ── Sidebar ───────────────────────────────────────────────────────────────────
 
-# Checks for Streamlit Community Cloud secret keys
 api_key = None
 try:
     if "TMDB_API_KEY" in st.secrets:
@@ -228,12 +200,10 @@ with st.sidebar:
     st.title("📼 RetroReel")
     st.subheader("Nostalgic Movie Archive")
     st.divider()
-    
     if api_key:
         st.success("🔑 Poster Database Connected")
     else:
         st.warning("⚠️ Poster Database Disconnected (Configure TMDB_API_KEY in Secrets)")
-            
     st.divider()
     st.caption("📻 **Nostalgia Archive Statistics**\n610 classic users\n9,742 nostalgic movies\n100,836 rating records (up to 2018)")
 
@@ -245,6 +215,7 @@ with st.spinner("Dusting off the archives and loading data..."):
     ratings, movies, ratings_matrix, movies_genres_set, rating_stats = load_data()
 
 # ── Page Title ────────────────────────────────────────────────────────────────
+
 st.markdown("""
     <div style='text-align:center; padding: 1.5rem 0 0.5rem 0;'>
         <h1 style='font-size:3rem; margin-bottom:0;'>📼 RetroReel</h1>
@@ -255,9 +226,6 @@ st.markdown("""
     </div>
 """, unsafe_allow_html=True)
 
-tab1, tab2, tab3 = st.tabs(["🎯 Similar Classics", "👤 Your Nostalgic Taste", "ℹ️ Archive Blueprint"])
-
-
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 
 tab1, tab2, tab3 = st.tabs(["🎯 Similar Classics", "👤 Your Nostalgic Taste", "ℹ️ Archive Blueprint"])
@@ -266,16 +234,15 @@ tab1, tab2, tab3 = st.tabs(["🎯 Similar Classics", "👤 Your Nostalgic Taste"
 with tab1:
     st.header("Find Similar Classics")
     st.caption("Search across legendary cinema milestones, 90s hits, and nostalgic favorites released up to 2018.")
-    
+
     query = st.text_input(
-        "Type a nostalgic film title", 
+        "Type a nostalgic film title",
         placeholder="Toy Story (1995), Avengers (2012), Interstellar (2014), Iron Man (2008)..."
     )
 
     selected_id = None
     if query:
         matches = movies[movies["title"].str.contains(query, case=False, na=False)]
-
         if matches.empty:
             st.error(f"No movie found matching '{query}' in our pre-2018 archive.")
         elif len(matches) == 1:
@@ -286,17 +253,16 @@ with tab1:
             selected_id = int(matches[matches["title"] == choice]["movie_id"].values[0])
 
     if selected_id is not None:
-        with st.spinner("Spooling identical recommendation tape..."):
+        with st.spinner("Spooling recommendation tape..."):
             recs = get_hybrid_recs(selected_id, ratings_matrix, movies_genres_set, movies, rating_stats)
-        st.subheader("Top 10 similar favorites recommended for you")
+        st.subheader("Top 10 similar favorites")
         movie_cards(recs, api_key)
 
-# Tab 2 — Interactive User Profile Builder (Fixes the UX Flaw)
+# Tab 2 — User profile
 with tab2:
     st.header("Your Personal Retro Reel Profile")
-    st.caption("Build your own cinematic spool! Rate a few classic movies you have seen to get custom recommendations tailored specifically to your taste.")
+    st.caption("Build your own cinematic spool! Rate a few classic movies to get custom recommendations.")
 
-    # Select mode: Live Interactive Profile vs Offline demo
     profile_mode = st.radio(
         "Choose profile setup method:",
         ["🎨 Rate Popular Classics (Build New Profile)", "🔎 Explore Historic Database Profiles (Demo)"],
@@ -304,12 +270,11 @@ with tab2:
     )
 
     if profile_mode == "🎨 Rate Popular Classics (Build New Profile)":
-        # Pull 30 of the most rated movies in our archive to present as choices
         popular_ids = rating_stats.sort_values("count", ascending=False).head(30).index
         popular_movies = movies[movies["movie_id"].isin(popular_ids)]
 
         selected_classics = st.multiselect(
-            "Which of these classic movies have you watched? (Choose at least 3 for best results)",
+            "Which of these classic movies have you watched? (Choose at least 3)",
             options=popular_movies["title"].tolist(),
             default=["Toy Story (1995)", "Matrix, The (1999)", "Forrest Gump (1994)"]
         )
@@ -317,49 +282,38 @@ with tab2:
         if selected_classics:
             st.markdown("### Rate Your Choices (1 to 5 Stars):")
             custom_ratings = {}
-            
-            # Render a grid / rating options
             for title in selected_classics:
                 mid = int(movies[movies["title"] == title]["movie_id"].values[0])
                 col_title, col_stars = st.columns([3, 1])
                 with col_title:
                     st.markdown(f"🎞️ **{title}**")
                 with col_stars:
-                    rating = st.selectbox(
-                        "Stars", [5, 4, 3, 2, 1], 
-                        key=f"user_rate_{mid}", 
-                        help=f"Rate {title}"
-                    )
+                    rating = st.selectbox("Stars", [5, 4, 3, 2, 1], key=f"user_rate_{mid}")
                     custom_ratings[mid] = rating
-            
+
             if st.button("Generate My Custom Recommendation Spool", type="primary"):
-                with st.spinner("Mapping your unique taste to historic rating profiles..."):
+                with st.spinner("Mapping your taste to historic rating profiles..."):
                     user_recs = get_user_recs(custom_ratings, ratings_matrix, movies, rating_stats)
                 if not user_recs.empty:
                     st.success("🎉 Your customized recommendation spool is ready!")
                     st.subheader("Top 10 nostalgic recommendations for you")
                     movie_cards(user_recs, api_key)
                 else:
-                    st.error("Something went wrong processing your profile ratings. Please try again.")
+                    st.error("Something went wrong. Please try again.")
         else:
-            st.info("Select classic movies from the box above to begin building your custom reel profile.")
+            st.info("Select classic movies from the box above to begin.")
 
     else:
-        # Demo / Explorer Mode: Browse anonymous MovieLens user profiles (1–610)
         st.subheader("Explore Historical Profiles")
-        st.caption("This mode lets you browse the raw anonymous movie choices made by the original MovieLens research participants.")
-        
-        user_id = st.number_input(
-            "Select Anonymous Database Profile ID (1–610)", 
-            min_value=1, max_value=610, value=1, step=1
-        )
+        st.caption("Browse anonymous MovieLens research participant profiles.")
+
+        user_id = st.number_input("Profile ID (1–610)", min_value=1, max_value=610, value=1, step=1)
 
         if st.button("Load Archival Profile Recommendation Spool"):
             rated_df = (
                 ratings[ratings["user_id"] == user_id]
                 .merge(movies[["movie_id", "title"]], on="movie_id")
             )
-
             col1, col2 = st.columns([1, 3])
             with col1:
                 st.markdown(f"📂 **Archival Profile ID {user_id}**")
@@ -367,10 +321,8 @@ with tab2:
                 st.markdown("### Top Ratings:")
                 for _, r in rated_df.sort_values("rating", ascending=False).head(5).iterrows():
                     st.markdown(f"{'⭐' * int(r['rating'])} {r['title']}")
-
             with col2:
                 with st.spinner("Rewinding recommendations tape..."):
-                    # Map profile ratings to dynamic recommendations
                     db_user_ratings = ratings_matrix.loc[user_id].to_dict()
                     db_user_ratings = {mid: r for mid, r in db_user_ratings.items() if r > 0}
                     user_recs = get_user_recs(db_user_ratings, ratings_matrix, movies, rating_stats)
@@ -380,19 +332,19 @@ with tab2:
 with tab3:
     st.header("The Vintage Engine Blueprint")
     st.markdown("""
-    Welcome to **RetroReel**! This application is purposely tuned to provide nostalgic recommendations using standard collaborative filtering math on the historic GroupLens data.
-    
-    ### 📼 Why only pre-2018 movies?
-    This site runs on the celebrated **MovieLens Latest Small** dataset, compiled in **September 2018**. Instead of clogging memory with modern databases, this platform celebrates the **Golden Age of Hollywood, 90s Blockbusters, and Nostalgic 2000s/2010s Hits**. 
+    Welcome to **RetroReel**! Nostalgic recommendations powered by the historic GroupLens MovieLens dataset.
 
-    ### 🎞️ Recommendation Mathematics:
-    *   **Item-Based Collaborative Filtering**: Maps similar movies by analyzing how users jointly rated older releases. If vintage archivists who loved *Star Wars* also loved *The Empire Strikes Back*, a mathematical correlation is formed.
-    *   **Content-Based Modeling**: Maps similarity vectors over 20 distinct classic genres (like *Film-Noir*, *Musical*, *Sci-Fi*, and *IMAX*) to balance out ratings and find hidden thematic gems.
-    *   **Hybrid Blend**: Combined weighting (60% Collaborative + 40% Content) tuned for vintage accuracy.
+    ### 📼 Why only pre-2018 movies?
+    This app runs on **MovieLens Latest Small**, compiled in September 2018 — celebrating Golden Age Hollywood, 90s blockbusters, and 2000s/2010s hits.
+
+    ### 🎞️ Recommendation Mathematics
+    - **Item-Based Collaborative Filtering**: Finds movies similar to yours based on shared rating patterns across 610 users.
+    - **Content-Based Filtering**: Computes cosine similarity across a 20-dimensional binary genre matrix to surface thematic matches.
+    - **Hybrid Blend**: 60% collaborative + 40% content, weighted by popularity and mean rating.
 
     ---
-    **Engine Stack:** Python · Pandas · Scikit-learn · Streamlit · TMDB API (Optional)  
-    **Archive Source:** MovieLens Latest (Small) — GroupLens Research, University of Minnesota
+    **Stack:** Python · Pandas · Scikit-learn · Streamlit · TMDB API  
+    **Dataset:** MovieLens Latest Small — GroupLens Research, University of Minnesota
 
     Garv Rana · EE Undergrad · [DTU](https://dtu.ac.in) · [GitHub](https://github.com/garvranaaa) · [LinkedIn](https://linkedin.com/in/garvsanjeevrana)
     """)
