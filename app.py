@@ -15,45 +15,50 @@ import zipfile
 
 st.set_page_config(page_title="Movie Recommender", page_icon="🎬", layout="wide")
 
+# Updated genre list to support ml-latest-small (including IMAX and updated 'Children')
 GENRES = [
-    'unknown', 'Action', 'Adventure', 'Animation', "Children's",
-    'Comedy', 'Crime', 'Documentary', 'Drama', 'Fantasy',
-    'Film-Noir', 'Horror', 'Musical', 'Mystery', 'Romance',
-    'Sci-Fi', 'Thriller', 'War', 'Western'
+    'Action', 'Adventure', 'Animation', 'Children', 'Comedy', 'Crime',
+    'Documentary', 'Drama', 'Fantasy', 'Film-Noir', 'Horror', 'IMAX',
+    'Musical', 'Mystery', 'Romance', 'Sci-Fi', 'Thriller', 'War', 'Western',
+    '(no genres listed)'
 ]
 
 # ── Data ──────────────────────────────────────────────────────────────────────
 
-# FIX 1: download_data() is now outside @st.cache_data so the spinner
-# actually renders. Previously it was buried inside load_data() where
-# Streamlit can't show UI elements during a cached call.
 def download_data():
-    if not os.path.exists("ml-100k"):
-        with st.spinner("Downloading MovieLens 100K dataset (first run only)..."):
-            url = "https://files.grouplens.org/datasets/movielens/ml-100k.zip"
-            urllib.request.urlretrieve(url, "ml-100k.zip")
-            with zipfile.ZipFile("ml-100k.zip", "r") as z:
+    if not os.path.exists("ml-latest-small"):
+        with st.spinner("Downloading MovieLens Latest Small dataset (first run only)..."):
+            url = "https://files.grouplens.org/datasets/movielens/ml-latest-small.zip"
+            urllib.request.urlretrieve(url, "ml-latest-small.zip")
+            with zipfile.ZipFile("ml-latest-small.zip", "r") as z:
                 z.extractall(".")
-            os.remove("ml-100k.zip")
+            os.remove("ml-latest-small.zip")
 
 
 @st.cache_data
 def load_data():
+    # Load and rename columns to match the code's expected snake_case format
     ratings = pd.read_csv(
-        "ml-100k/u.data", sep="\t",
-        names=["user_id", "movie_id", "rating", "timestamp"]
-    )
+        "ml-latest-small/ratings.csv"
+    ).rename(columns={"userId": "user_id", "movieId": "movie_id"})
 
-    movie_cols = ["movie_id", "title", "release_date", "video_release_date", "imdb_url"] + GENRES
-    movies = pd.read_csv(
-        "ml-100k/u.item", sep="|",
-        names=movie_cols, encoding="latin-1"
-    )[["movie_id", "title"] + GENRES]
+    movies_raw = pd.read_csv(
+        "ml-latest-small/movies.csv"
+    ).rename(columns={"movieId": "movie_id"})
 
+    # Dynamically one-hot encode the pipe-separated genres column
+    for g in GENRES:
+        movies_raw[g] = movies_raw["genres"].apply(lambda x: 1 if g in str(x).split("|") else 0)
+
+    # Clean the dataset to use only essential columns
+    movies = movies_raw[["movie_id", "title"] + GENRES]
+
+    # Build User-Item sparse ratings matrix
     ratings_matrix = ratings.pivot_table(
         index="user_id", columns="movie_id", values="rating"
     ).fillna(0)
 
+    # Compute item similarities
     item_sim = cosine_similarity(ratings_matrix.T)
     item_sim_df = pd.DataFrame(
         item_sim,
@@ -61,6 +66,7 @@ def load_data():
         columns=ratings_matrix.columns
     )
 
+    # Compute content/genre similarities
     genre_matrix = movies.set_index("movie_id")[GENRES].values
     genre_sim = cosine_similarity(genre_matrix)
     genre_sim_df = pd.DataFrame(
@@ -69,8 +75,6 @@ def load_data():
         columns=movies["movie_id"]
     )
 
-    # FIX 2: Keep both mean and count — mean is now actually used in scoring
-    # (previously mean was computed but silently dropped in the merge)
     rating_stats = ratings.groupby("movie_id")["rating"].agg(["mean", "count"])
 
     return ratings, movies, ratings_matrix, item_sim_df, genre_sim_df, rating_stats
@@ -78,33 +82,42 @@ def load_data():
 # ── Recommenders ──────────────────────────────────────────────────────────────
 
 def get_hybrid_recs(movie_id, item_sim_df, genre_sim_df, movies, rating_stats, n=10):
-    if movie_id not in item_sim_df.columns:
+    if movie_id not in genre_sim_df.index:
         return pd.DataFrame()
 
-    collab = item_sim_df[movie_id].drop(movie_id)
-    content = (
-        genre_sim_df[movie_id].drop(movie_id)
-        if movie_id in genre_sim_df.columns
-        else pd.Series(dtype=float)
-    )
+    content = genre_sim_df[movie_id].drop(movie_id, errors='ignore')
+    
+    # Fallback structure if the movie exists but hasn't received any ratings
+    if movie_id in item_sim_df.columns:
+        collab = item_sim_df[movie_id].drop(movie_id, errors='ignore')
+    else:
+        collab = pd.Series(0, index=content.index)
 
     def norm(s):
         mn, mx = s.min(), s.max()
+        if mn == mx:
+            return pd.Series(0, index=s.index)
         return (s - mn) / (mx - mn + 1e-8)
 
     collab_n = norm(collab)
     content_n = norm(content).reindex(collab_n.index, fill_value=0)
-    hybrid = (0.6 * collab_n + 0.4 * content_n).sort_values(ascending=False).head(n * 2)
+    
+    # If the item has no collaborative data, weigh 100% on content similarities
+    if movie_id in item_sim_df.columns:
+        hybrid = (0.6 * collab_n + 0.4 * content_n).sort_values(ascending=False).head(n * 2)
+    else:
+        hybrid = content_n.sort_values(ascending=False).head(n * 2)
 
     recs = movies[movies["movie_id"].isin(hybrid.index)].copy()
     recs["score"] = recs["movie_id"].map(hybrid)
 
-    # FIX 2 (continued): merge both columns and apply mean to scoring
-    # A highly similar movie with a 4.5 avg rating beats one with 2.1
     recs = recs.merge(rating_stats, left_on="movie_id", right_index=True, how="left")
+    recs["count"] = recs["count"].fillna(0)
+    recs["mean"] = recs["mean"].fillna(3.0)
+
     recs["score"] *= (
-        (1 + np.log1p(recs["count"].fillna(0)) * 0.05)
-        * (recs["mean"].fillna(3.5) / 5)
+        (1 + np.log1p(recs["count"]) * 0.05)
+        * (recs["mean"] / 5)
     )
 
     return recs.sort_values("score", ascending=False).head(n)
@@ -119,7 +132,7 @@ def get_user_recs(user_id, ratings, ratings_matrix, item_sim_df, movies, rating_
     unrated = user_ratings[user_ratings == 0].index
 
     scores = {}
-    sim_sums = {}  # FIX 3: track total similarity weight per candidate movie
+    sim_sums = {}
 
     for movie_id, rating in rated.items():
         if movie_id not in item_sim_df.columns:
@@ -132,8 +145,6 @@ def get_user_recs(user_id, ratings, ratings_matrix, item_sim_df, movies, rating_
     if not scores:
         return pd.DataFrame()
 
-    # FIX 3: divide by sum-of-similarities so a user with 300 rated movies
-    # doesn't automatically outscore a user with 20 rated movies
     normalized = {mid: scores[mid] / (sim_sums[mid] + 1e-8) for mid in scores}
 
     scores_s = pd.Series(normalized).sort_values(ascending=False).head(n * 2)
@@ -151,9 +162,16 @@ def get_poster(title, api_key):
         return None
     try:
         clean = title.split("(")[0].strip()
+        
+        # Clean up titles with trailing articles (e.g. "Avengers, The" -> "The Avengers")
+        if ", The" in clean:
+            clean = "The " + clean.replace(", The", "").strip()
+        elif ", A" in clean:
+            clean = "A " + clean.replace(", A", "").strip()
+        elif ", An" in clean:
+            clean = "An " + clean.replace(", An", "").strip()
 
-        # FIX 4: extract the year from the title string (e.g. "Toy Story (1995)")
-        # and pass it as a param so TMDB returns the right film, not a remake
+        # Parse release year from dataset title format
         year_match = re.search(r'\((\d{4})\)', title)
         params = {"api_key": api_key, "query": clean}
         if year_match:
@@ -207,12 +225,10 @@ with st.sidebar:
     if not api_key:
         st.info("Add a TMDB key to load movie posters")
     st.divider()
-    st.caption("📊 MovieLens 100K\n943 users · 1,682 movies · 100,000 ratings")
+    st.caption("📊 MovieLens Latest Small\n610 users · 9,742 movies · 100,836 ratings")
 
 # ── Load ──────────────────────────────────────────────────────────────────────
 
-# FIX 1 (continued): download runs before the cached function,
-# so the spinner is visible on first launch
 download_data()
 
 with st.spinner("Loading data and computing similarity matrices..."):
@@ -225,7 +241,7 @@ tab1, tab2, tab3 = st.tabs(["🎯 Similar Movies", "👤 For You", "ℹ️ About
 # Tab 1 — Movie search
 with tab1:
     st.header("Find Similar Movies")
-    query = st.text_input("Type a movie title", placeholder="Toy Story, Star Wars, Titanic...")
+    query = st.text_input("Type a movie title", placeholder="Toy Story, Avengers, Iron Man, Titanic...")
 
     selected_id = None
     if query:
@@ -251,7 +267,7 @@ with tab2:
     st.header("Personalized Recommendations")
     st.caption("Movies you haven't seen, predicted from your rating history.")
 
-    user_id = st.number_input("User ID (1–943)", min_value=1, max_value=943, value=1, step=1)
+    user_id = st.number_input("User ID (1–610)", min_value=1, max_value=610, value=1, step=1)
 
     if st.button("Get recommendations", type="primary"):
         rated_df = (
@@ -277,17 +293,17 @@ with tab3:
     st.header("How this works")
     st.markdown("""
     **Item-Based Collaborative Filtering**  
-    Builds a 943×1682 user-item rating matrix. Computes cosine similarity between items — if users who liked Movie A also liked Movie B, they're similar.
+    Builds a user-item rating matrix. Computes cosine similarity between items — if users who liked Movie A also liked Movie B, they're marked similar.
 
     **Content-Based Filtering**  
-    Each movie has a 19-dimensional binary genre vector. Cosine similarity on these vectors finds movies in the same genre space. Handles cases where a movie has few ratings.
+    Each movie maps to a 20-dimensional binary genre vector. Cosine similarity on these vectors finds movies in the same genre space. Helps handle newer or less-rated items.
 
     **Hybrid (default)**  
-    60% collaborative + 40% content-based. Collaborative captures taste patterns; content adds genre diversity. The blend outperforms either alone.
+    60% collaborative + 40% content-based. Collaborative captures user behavior trends; content ensures structural alignment.
 
     ---
     **Stack:** Pandas · Scikit-learn · Streamlit · TMDB API · NumPy  
-    **Dataset:** MovieLens 100K — GroupLens Research, University of Minnesota
+    **Dataset:** MovieLens Latest (Small) — GroupLens Research, University of Minnesota
 
     Garv Rana · EE Undergrad · [DTU](https://dtu.ac.in) · [GitHub](https://github.com/garvranaaa) · [LinkedIn](https://linkedin.com/in/garvsanjeevrana)
     """)
