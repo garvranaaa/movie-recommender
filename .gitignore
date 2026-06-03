@@ -1,0 +1,22 @@
+__pycache__/
+.venv/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+ENV/
+.pytest_cache/
+
+# Streamlit cache
+.streamlit/
+
+# macOS
+.DS_Store
+
+# Python packaging
+*.egg-info/
+*.egg
+dist/
+build/
