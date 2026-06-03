@@ -15,7 +15,6 @@ import zipfile
 
 st.set_page_config(page_title="Movie Recommender", page_icon="🎬", layout="wide")
 
-# Updated genre list to support ml-latest-small (including IMAX and updated 'Children')
 GENRES = [
     'Action', 'Adventure', 'Animation', 'Children', 'Comedy', 'Crime',
     'Documentary', 'Drama', 'Fantasy', 'Film-Noir', 'Horror', 'IMAX',
@@ -37,7 +36,7 @@ def download_data():
 
 @st.cache_data
 def load_data():
-    # Load and rename columns to match the code's expected snake_case format
+    # Load and map keys to snake_case
     ratings = pd.read_csv(
         "ml-latest-small/ratings.csv"
     ).rename(columns={"userId": "user_id", "movieId": "movie_id"})
@@ -46,50 +45,42 @@ def load_data():
         "ml-latest-small/movies.csv"
     ).rename(columns={"movieId": "movie_id"})
 
-    # Dynamically one-hot encode the pipe-separated genres column
+    # One-hot encode genres dynamically
     for g in GENRES:
         movies_raw[g] = movies_raw["genres"].apply(lambda x: 1 if g in str(x).split("|") else 0)
 
-    # Clean the dataset to use only essential columns
     movies = movies_raw[["movie_id", "title"] + GENRES]
 
-    # Build User-Item sparse ratings matrix
+    # Sparse user-movie matrix
     ratings_matrix = ratings.pivot_table(
         index="user_id", columns="movie_id", values="rating"
     ).fillna(0)
 
-    # Compute item similarities
-    item_sim = cosine_similarity(ratings_matrix.T)
-    item_sim_df = pd.DataFrame(
-        item_sim,
-        index=ratings_matrix.columns,
-        columns=ratings_matrix.columns
-    )
-
-    # Compute content/genre similarities
-    genre_matrix = movies.set_index("movie_id")[GENRES].values
-    genre_sim = cosine_similarity(genre_matrix)
-    genre_sim_df = pd.DataFrame(
-        genre_sim,
-        index=movies["movie_id"],
-        columns=movies["movie_id"]
-    )
+    # Genre lookup index
+    movies_genres_set = movies.set_index("movie_id")[GENRES]
 
     rating_stats = ratings.groupby("movie_id")["rating"].agg(["mean", "count"])
 
-    return ratings, movies, ratings_matrix, item_sim_df, genre_sim_df, rating_stats
+    return ratings, movies, ratings_matrix, movies_genres_set, rating_stats
 
 # ── Recommenders ──────────────────────────────────────────────────────────────
 
-def get_hybrid_recs(movie_id, item_sim_df, genre_sim_df, movies, rating_stats, n=10):
-    if movie_id not in genre_sim_df.index:
+def get_hybrid_recs(movie_id, ratings_matrix, movies_genres_set, movies, rating_stats, n=10):
+    if movie_id not in movies_genres_set.index:
         return pd.DataFrame()
 
-    content = genre_sim_df[movie_id].drop(movie_id, errors='ignore')
+    # Dynamic on-the-fly content similarity calculation (Zero memory footprint)
+    movie_genre_vec = movies_genres_set.loc[movie_id].values.reshape(1, -1)
+    all_genre_vecs = movies_genres_set.values
+    content_sims = cosine_similarity(movie_genre_vec, all_genre_vecs).flatten()
+    content = pd.Series(content_sims, index=movies_genres_set.index).drop(movie_id, errors='ignore')
     
-    # Fallback structure if the movie exists but hasn't received any ratings
-    if movie_id in item_sim_df.columns:
-        collab = item_sim_df[movie_id].drop(movie_id, errors='ignore')
+    # Dynamic on-the-fly collaborative similarity calculation (Zero memory footprint)
+    if movie_id in ratings_matrix.columns:
+        movie_collab_vec = ratings_matrix[movie_id].values.reshape(1, -1)
+        all_collab_vecs = ratings_matrix.values.T # shape (9724, 610)
+        collab_sims = cosine_similarity(movie_collab_vec, all_collab_vecs).flatten()
+        collab = pd.Series(collab_sims, index=ratings_matrix.columns).drop(movie_id, errors='ignore')
     else:
         collab = pd.Series(0, index=content.index)
 
@@ -102,8 +93,7 @@ def get_hybrid_recs(movie_id, item_sim_df, genre_sim_df, movies, rating_stats, n
     collab_n = norm(collab)
     content_n = norm(content).reindex(collab_n.index, fill_value=0)
     
-    # If the item has no collaborative data, weigh 100% on content similarities
-    if movie_id in item_sim_df.columns:
+    if movie_id in ratings_matrix.columns:
         hybrid = (0.6 * collab_n + 0.4 * content_n).sort_values(ascending=False).head(n * 2)
     else:
         hybrid = content_n.sort_values(ascending=False).head(n * 2)
@@ -123,31 +113,33 @@ def get_hybrid_recs(movie_id, item_sim_df, genre_sim_df, movies, rating_stats, n
     return recs.sort_values("score", ascending=False).head(n)
 
 
-def get_user_recs(user_id, ratings, ratings_matrix, item_sim_df, movies, rating_stats, n=10):
+def get_user_recs(user_id, ratings_matrix, movies, rating_stats, n=10):
     if user_id not in ratings_matrix.index:
         return pd.DataFrame()
 
     user_ratings = ratings_matrix.loc[user_id]
     rated = user_ratings[user_ratings > 0]
+    
+    if rated.empty:
+        return pd.DataFrame()
+        
     unrated = user_ratings[user_ratings == 0].index
 
-    scores = {}
-    sim_sums = {}
-
-    for movie_id, rating in rated.items():
-        if movie_id not in item_sim_df.columns:
-            continue
-        sims = item_sim_df[movie_id].reindex(unrated, fill_value=0)
-        for mid, sim in sims.items():
-            scores[mid] = scores.get(mid, 0) + sim * rating
-            sim_sums[mid] = sim_sums.get(mid, 0) + abs(sim)
-
-    if not scores:
-        return pd.DataFrame()
-
-    normalized = {mid: scores[mid] / (sim_sums[mid] + 1e-8) for mid in scores}
-
-    scores_s = pd.Series(normalized).sort_values(ascending=False).head(n * 2)
+    # Highly optimized matrix multiplication to get user recommendations without precalculating similarity
+    rated_vectors = ratings_matrix[rated.index].values.T
+    unrated_vectors = ratings_matrix[unrated].values.T
+    
+    # Compute cosine similarity between only rated and unrated elements
+    sim_matrix = cosine_similarity(rated_vectors, unrated_vectors)
+    ratings_arr = rated.values.reshape(-1, 1)
+    
+    # Weighted dot product
+    scores_arr = (sim_matrix * ratings_arr).sum(axis=0)
+    sim_sums_arr = np.abs(sim_matrix).sum(axis=0) + 1e-8
+    norm_scores = scores_arr / sim_sums_arr
+    
+    scores_s = pd.Series(norm_scores, index=unrated).sort_values(ascending=False).head(n * 2)
+    
     recs = movies[movies["movie_id"].isin(scores_s.index)].copy()
     recs["score"] = recs["movie_id"].map(scores_s)
     recs = recs.merge(rating_stats[["count"]], left_on="movie_id", right_index=True, how="left")
@@ -163,7 +155,6 @@ def get_poster(title, api_key):
     try:
         clean = title.split("(")[0].strip()
         
-        # Clean up titles with trailing articles (e.g. "Avengers, The" -> "The Avengers")
         if ", The" in clean:
             clean = "The " + clean.replace(", The", "").strip()
         elif ", A" in clean:
@@ -171,7 +162,6 @@ def get_poster(title, api_key):
         elif ", An" in clean:
             clean = "An " + clean.replace(", An", "").strip()
 
-        # Parse release year from dataset title format
         year_match = re.search(r'\((\d{4})\)', title)
         params = {"api_key": api_key, "query": clean}
         if year_match:
@@ -200,7 +190,7 @@ def movie_cards(recs, api_key):
         with cols[i % 5]:
             poster = get_poster(row["title"], api_key)
             if poster:
-                st.image(poster, use_container_width=True)
+                st.image(poster, width="stretch")
             else:
                 st.markdown(
                     "<div style='background:#2d2d2d;height:160px;border-radius:8px;"
@@ -231,8 +221,8 @@ with st.sidebar:
 
 download_data()
 
-with st.spinner("Loading data and computing similarity matrices..."):
-    ratings, movies, ratings_matrix, item_sim_df, genre_sim_df, rating_stats = load_data()
+with st.spinner("Loading data..."):
+    ratings, movies, ratings_matrix, movies_genres_set, rating_stats = load_data()
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 
@@ -258,7 +248,7 @@ with tab1:
 
     if selected_id is not None:
         with st.spinner("Computing recommendations..."):
-            recs = get_hybrid_recs(selected_id, item_sim_df, genre_sim_df, movies, rating_stats)
+            recs = get_hybrid_recs(selected_id, ratings_matrix, movies_genres_set, movies, rating_stats)
         st.subheader("Top 10 similar movies")
         movie_cards(recs, api_key)
 
@@ -284,7 +274,7 @@ with tab2:
         with col2:
             with st.spinner("Finding recommendations..."):
                 user_recs = get_user_recs(
-                    user_id, ratings, ratings_matrix, item_sim_df, movies, rating_stats
+                    user_id, ratings_matrix, movies, rating_stats
                 )
             movie_cards(user_recs, api_key)
 
@@ -293,10 +283,10 @@ with tab3:
     st.header("How this works")
     st.markdown("""
     **Item-Based Collaborative Filtering**  
-    Builds a user-item rating matrix. Computes cosine similarity between items — if users who liked Movie A also liked Movie B, they're marked similar.
+    Builds a user-item rating matrix. Computes cosine similarity dynamically between items using optimized NumPy dot products — if users who liked Movie A also liked Movie B, they're marked similar.
 
     **Content-Based Filtering**  
-    Each movie maps to a 20-dimensional binary genre vector. Cosine similarity on these vectors finds movies in the same genre space. Helps handle newer or less-rated items.
+    Each movie maps to a 20-dimensional binary genre vector. Dynamic dot-products on these vectors find movies in the same genre space.
 
     **Hybrid (default)**  
     60% collaborative + 40% content-based. Collaborative captures user behavior trends; content ensures structural alignment.
