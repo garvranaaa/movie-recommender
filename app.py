@@ -69,13 +69,11 @@ def get_hybrid_recs(movie_id, ratings_matrix, movies_genres_set, movies, rating_
     if movie_id not in movies_genres_set.index:
         return pd.DataFrame()
 
-    # Dynamic on-the-fly content similarity calculation (Zero memory footprint)
     movie_genre_vec = movies_genres_set.loc[movie_id].values.reshape(1, -1)
     all_genre_vecs = movies_genres_set.values
     content_sims = cosine_similarity(movie_genre_vec, all_genre_vecs).flatten()
     content = pd.Series(content_sims, index=movies_genres_set.index).drop(movie_id, errors='ignore')
     
-    # Dynamic on-the-fly collaborative similarity calculation (Zero memory footprint)
     if movie_id in ratings_matrix.columns:
         movie_collab_vec = ratings_matrix[movie_id].values.reshape(1, -1)
         all_collab_vecs = ratings_matrix.values.T
@@ -113,24 +111,30 @@ def get_hybrid_recs(movie_id, ratings_matrix, movies_genres_set, movies, rating_
     return recs.sort_values("score", ascending=False).head(n)
 
 
-def get_user_recs(user_id, ratings_matrix, movies, rating_stats, n=10):
-    if user_id not in ratings_matrix.index:
+def get_user_recs(ratings_dict, ratings_matrix, movies, rating_stats, n=10):
+    if not ratings_dict:
         return pd.DataFrame()
 
-    user_ratings = ratings_matrix.loc[user_id]
-    rated = user_ratings[user_ratings > 0]
+    rated_ids = list(ratings_dict.keys())
+    # Ensure selected IDs are strictly inside our ratings matrix columns
+    valid_rated_ids = [mid for mid in rated_ids if mid in ratings_matrix.columns]
     
-    if rated.empty:
+    if not valid_rated_ids:
         return pd.DataFrame()
-        
-    unrated = user_ratings[user_ratings == 0].index
 
-    # Highly optimized matrix multiplication for user recommendations
-    rated_vectors = ratings_matrix[rated.index].values.T
+    rated_series = pd.Series({mid: ratings_dict[mid] for mid in valid_rated_ids})
+    all_movie_ids = ratings_matrix.columns
+    unrated = [mid for mid in all_movie_ids if mid not in valid_rated_ids]
+
+    if not unrated:
+        return pd.DataFrame()
+
+    # Optimized dynamic item-item calculations based on new user profile
+    rated_vectors = ratings_matrix[valid_rated_ids].values.T
     unrated_vectors = ratings_matrix[unrated].values.T
     
     sim_matrix = cosine_similarity(rated_vectors, unrated_vectors)
-    ratings_arr = rated.values.reshape(-1, 1)
+    ratings_arr = rated_series.values.reshape(-1, 1)
     
     scores_arr = (sim_matrix * ratings_arr).sum(axis=0)
     sim_sums_arr = np.abs(sim_matrix).sum(axis=0) + 1e-8
@@ -153,7 +157,6 @@ def get_poster(title, api_key):
     try:
         clean = title.split("(")[0].strip()
         
-        # Clean up typical retro-named entries (e.g. "Dark Knight, The (2008)")
         if ", The" in clean:
             clean = "The " + clean.replace(", The", "").strip()
         elif ", A" in clean:
@@ -204,7 +207,7 @@ def movie_cards(recs, api_key):
 
 # ── Sidebar & Secrets ─────────────────────────────────────────────────────────
 
-# Secure check for Streamlit Community Cloud secret keys
+# Checks for Streamlit Community Cloud secret keys
 api_key = None
 try:
     if "TMDB_API_KEY" in st.secrets:
@@ -265,33 +268,90 @@ with tab1:
         st.subheader("Top 10 similar favorites recommended for you")
         movie_cards(recs, api_key)
 
-# Tab 2 — User recommendations
+# Tab 2 — Interactive User Profile Builder (Fixes the UX Flaw)
 with tab2:
-    st.header("Your Nostalgic Profile")
-    st.caption("Classic favorites you haven't seen yet, generated from your vintage taste records.")
+    st.header("Your Personal Retro Reel Profile")
+    st.caption("Build your own cinematic spool! Rate a few classic movies you have seen to get custom recommendations tailored specifically to your taste.")
 
-    user_id = st.number_input("Vintage User Profile (ID: 1–610)", min_value=1, max_value=610, value=1, step=1)
+    # Select mode: Live Interactive Profile vs Offline demo
+    profile_mode = st.radio(
+        "Choose profile setup method:",
+        ["🎨 Rate Popular Classics (Build New Profile)", "🔎 Explore Historic Database Profiles (Demo)"],
+        horizontal=True
+    )
 
-    if st.button("Generate recommendation spool", type="primary"):
-        rated_df = (
-            ratings[ratings["user_id"] == user_id]
-            .merge(movies[["movie_id", "title"]], on="movie_id")
+    if profile_mode == "🎨 Rate Popular Classics (Build New Profile)":
+        # Pull 30 of the most rated movies in our archive to present as choices
+        popular_ids = rating_stats.sort_values("count", ascending=False).head(30).index
+        popular_movies = movies[movies["movie_id"].isin(popular_ids)]
+
+        selected_classics = st.multiselect(
+            "Which of these classic movies have you watched? (Choose at least 3 for best results)",
+            options=popular_movies["title"].tolist(),
+            default=["Toy Story (1995)", "Matrix, The (1999)", "Forrest Gump (1994)"]
         )
 
-        col1, col2 = st.columns([1, 3])
-        with col1:
-            st.markdown(f"**Retro Archivist {user_id}**")
-            st.caption(f"Rated **{len(rated_df)} classic movies**")
-            st.markdown("### Top Rated:")
-            for _, r in rated_df.sort_values("rating", ascending=False).head(5).iterrows():
-                st.markdown(f"{'⭐' * int(r['rating'])} {r['title']}")
+        if selected_classics:
+            st.markdown("### Rate Your Choices (1 to 5 Stars):")
+            custom_ratings = {}
+            
+            # Render a grid / rating options
+            for title in selected_classics:
+                mid = int(movies[movies["title"] == title]["movie_id"].values[0])
+                col_title, col_stars = st.columns([3, 1])
+                with col_title:
+                    st.markdown(f"🎞️ **{title}**")
+                with col_stars:
+                    rating = st.selectbox(
+                        "Stars", [5, 4, 3, 2, 1], 
+                        key=f"user_rate_{mid}", 
+                        help=f"Rate {title}"
+                    )
+                    custom_ratings[mid] = rating
+            
+            if st.button("Generate My Custom Recommendation Spool", type="primary"):
+                with st.spinner("Mapping your unique taste to historic rating profiles..."):
+                    user_recs = get_user_recs(custom_ratings, ratings_matrix, movies, rating_stats)
+                if not user_recs.empty:
+                    st.success("🎉 Your customized recommendation spool is ready!")
+                    st.subheader("Top 10 nostalgic recommendations for you")
+                    movie_cards(user_recs, api_key)
+                else:
+                    st.error("Something went wrong processing your profile ratings. Please try again.")
+        else:
+            st.info("Select classic movies from the box above to begin building your custom reel profile.")
 
-        with col2:
-            with st.spinner("Rewinding recommendations tape..."):
-                user_recs = get_user_recs(
-                    user_id, ratings_matrix, movies, rating_stats
-                )
-            movie_cards(user_recs, api_key)
+    else:
+        # Demo / Explorer Mode: Browse anonymous MovieLens user profiles (1–610)
+        st.subheader("Explore Historical Profiles")
+        st.caption("This mode lets you browse the raw anonymous movie choices made by the original MovieLens research participants.")
+        
+        user_id = st.number_input(
+            "Select Anonymous Database Profile ID (1–610)", 
+            min_value=1, max_value=610, value=1, step=1
+        )
+
+        if st.button("Load Archival Profile Recommendation Spool"):
+            rated_df = (
+                ratings[ratings["user_id"] == user_id]
+                .merge(movies[["movie_id", "title"]], on="movie_id")
+            )
+
+            col1, col2 = st.columns([1, 3])
+            with col1:
+                st.markdown(f"📂 **Archival Profile ID {user_id}**")
+                st.caption(f"Rated **{len(rated_df)} historic movies**")
+                st.markdown("### Top Ratings:")
+                for _, r in rated_df.sort_values("rating", ascending=False).head(5).iterrows():
+                    st.markdown(f"{'⭐' * int(r['rating'])} {r['title']}")
+
+            with col2:
+                with st.spinner("Rewinding recommendations tape..."):
+                    # Map profile ratings to dynamic recommendations
+                    db_user_ratings = ratings_matrix.loc[user_id].to_dict()
+                    db_user_ratings = {mid: r for mid, r in db_user_ratings.items() if r > 0}
+                    user_recs = get_user_recs(db_user_ratings, ratings_matrix, movies, rating_stats)
+                movie_cards(user_recs, api_key)
 
 # Tab 3 — About
 with tab3:
