@@ -13,7 +13,8 @@ import requests
 import urllib.request
 import zipfile
 
-st.set_page_config(page_title="Movie Recommender", page_icon="🎬", layout="wide")
+# Retro / Nostalgia Page Configuration
+st.set_page_config(page_title="RetroReel Archive", page_icon="📼", layout="wide")
 
 GENRES = [
     'Action', 'Adventure', 'Animation', 'Children', 'Comedy', 'Crime',
@@ -26,7 +27,7 @@ GENRES = [
 
 def download_data():
     if not os.path.exists("ml-latest-small"):
-        with st.spinner("Downloading MovieLens Latest Small dataset (first run only)..."):
+        with st.spinner("Rewinding the tape... Downloading the RetroReel Database..."):
             url = "https://files.grouplens.org/datasets/movielens/ml-latest-small.zip"
             urllib.request.urlretrieve(url, "ml-latest-small.zip")
             with zipfile.ZipFile("ml-latest-small.zip", "r") as z:
@@ -36,7 +37,6 @@ def download_data():
 
 @st.cache_data
 def load_data():
-    # Load and map keys to snake_case
     ratings = pd.read_csv(
         "ml-latest-small/ratings.csv"
     ).rename(columns={"userId": "user_id", "movieId": "movie_id"})
@@ -63,7 +63,7 @@ def load_data():
 
     return ratings, movies, ratings_matrix, movies_genres_set, rating_stats
 
-# ── Recommenders ──────────────────────────────────────────────────────────────
+# ── Recommenders (Optimized Dynamic Engine to prevent crashes) ───────────────
 
 def get_hybrid_recs(movie_id, ratings_matrix, movies_genres_set, movies, rating_stats, n=10):
     if movie_id not in movies_genres_set.index:
@@ -78,7 +78,7 @@ def get_hybrid_recs(movie_id, ratings_matrix, movies_genres_set, movies, rating_
     # Dynamic on-the-fly collaborative similarity calculation (Zero memory footprint)
     if movie_id in ratings_matrix.columns:
         movie_collab_vec = ratings_matrix[movie_id].values.reshape(1, -1)
-        all_collab_vecs = ratings_matrix.values.T # shape (9724, 610)
+        all_collab_vecs = ratings_matrix.values.T
         collab_sims = cosine_similarity(movie_collab_vec, all_collab_vecs).flatten()
         collab = pd.Series(collab_sims, index=ratings_matrix.columns).drop(movie_id, errors='ignore')
     else:
@@ -125,15 +125,13 @@ def get_user_recs(user_id, ratings_matrix, movies, rating_stats, n=10):
         
     unrated = user_ratings[user_ratings == 0].index
 
-    # Highly optimized matrix multiplication to get user recommendations without precalculating similarity
+    # Highly optimized matrix multiplication for user recommendations
     rated_vectors = ratings_matrix[rated.index].values.T
     unrated_vectors = ratings_matrix[unrated].values.T
     
-    # Compute cosine similarity between only rated and unrated elements
     sim_matrix = cosine_similarity(rated_vectors, unrated_vectors)
     ratings_arr = rated.values.reshape(-1, 1)
     
-    # Weighted dot product
     scores_arr = (sim_matrix * ratings_arr).sum(axis=0)
     sim_sums_arr = np.abs(sim_matrix).sum(axis=0) + 1e-8
     norm_scores = scores_arr / sim_sums_arr
@@ -146,7 +144,7 @@ def get_user_recs(user_id, ratings_matrix, movies, rating_stats, n=10):
 
     return recs.sort_values("score", ascending=False).head(n)
 
-# ── TMDB ──────────────────────────────────────────────────────────────────────
+# ── TMDB Poster Downloader ───────────────────────────────────────────────────
 
 @st.cache_data(ttl=86400)
 def get_poster(title, api_key):
@@ -155,6 +153,7 @@ def get_poster(title, api_key):
     try:
         clean = title.split("(")[0].strip()
         
+        # Clean up typical retro-named entries (e.g. "Dark Knight, The (2008)")
         if ", The" in clean:
             clean = "The " + clean.replace(", The", "").strip()
         elif ", A" in clean:
@@ -182,7 +181,7 @@ def get_poster(title, api_key):
 
 def movie_cards(recs, api_key):
     if recs.empty:
-        st.warning("No recommendations found.")
+        st.warning("The projectionist couldn't find any recommendations in the archive.")
         return
 
     cols = st.columns(5)
@@ -193,73 +192,87 @@ def movie_cards(recs, api_key):
                 st.image(poster, width="stretch")
             else:
                 st.markdown(
-                    "<div style='background:#2d2d2d;height:160px;border-radius:8px;"
-                    "display:flex;align-items:center;justify-content:center;font-size:36px'>🎬</div>",
+                    "<div style='background:#1e1e1e;height:240px;border-radius:8px;"
+                    "display:flex;align-items:center;justify-content:center;font-size:48px;"
+                    "border: 2px dashed #444;'>📼</div>",
                     unsafe_allow_html=True
                 )
-            genres = [g for g in GENRES if row.get(g, 0) == 1]
+            genres = [g for g in GENRES if row.get(g, 0) == 1 and g != '(no genres listed)']
             st.markdown(f"**{row['title']}**")
             if genres:
                 st.caption(", ".join(genres[:3]))
 
-# ── Sidebar ───────────────────────────────────────────────────────────────────
+# ── Sidebar & Secrets ─────────────────────────────────────────────────────────
+
+# Secure check for Streamlit Community Cloud secret keys
+api_key = None
+try:
+    if "TMDB_API_KEY" in st.secrets:
+        api_key = st.secrets["TMDB_API_KEY"]
+except Exception:
+    pass
 
 with st.sidebar:
-    st.title("🎬 Movie Recommender")
+    st.title("📼 RetroReel")
+    st.subheader("Nostalgic Movie Archive")
     st.divider()
-    api_key = st.text_input(
-        "TMDB API Key (optional)",
-        type="password",
-        help="Free key at themoviedb.org — enables movie posters"
-    )
-    if not api_key:
-        st.info("Add a TMDB key to load movie posters")
+    
+    if api_key:
+        st.success("🔑 Poster Database Connected")
+    else:
+        st.warning("⚠️ Poster Database Disconnected (Configure TMDB_API_KEY in Secrets)")
+            
     st.divider()
-    st.caption("📊 MovieLens Latest Small\n610 users · 9,742 movies · 100,836 ratings")
+    st.caption("📻 **Nostalgia Archive Statistics**\n610 classic users\n9,742 nostalgic movies\n100,836 rating records (up to 2018)")
 
 # ── Load ──────────────────────────────────────────────────────────────────────
 
 download_data()
 
-with st.spinner("Loading data..."):
+with st.spinner("Dusting off the archives and loading data..."):
     ratings, movies, ratings_matrix, movies_genres_set, rating_stats = load_data()
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 
-tab1, tab2, tab3 = st.tabs(["🎯 Similar Movies", "👤 For You", "ℹ️ About"])
+tab1, tab2, tab3 = st.tabs(["🎯 Similar Classics", "👤 Your Nostalgic Taste", "ℹ️ Archive Blueprint"])
 
 # Tab 1 — Movie search
 with tab1:
-    st.header("Find Similar Movies")
-    query = st.text_input("Type a movie title", placeholder="Toy Story, Avengers, Iron Man, Titanic...")
+    st.header("Find Similar Classics")
+    st.caption("Search across legendary cinema milestones, 90s hits, and nostalgic favorites released up to 2018.")
+    
+    query = st.text_input(
+        "Type a nostalgic film title", 
+        placeholder="Toy Story (1995), Avengers (2012), Interstellar (2014), Iron Man (2008)..."
+    )
 
     selected_id = None
     if query:
         matches = movies[movies["title"].str.contains(query, case=False, na=False)]
 
         if matches.empty:
-            st.error(f"No movie found matching '{query}'")
+            st.error(f"No movie found matching '{query}' in our pre-2018 archive.")
         elif len(matches) == 1:
             selected_id = int(matches["movie_id"].values[0])
-            st.success(f"**{matches['title'].values[0]}**")
+            st.success(f"**📼 Now Playing: {matches['title'].values[0]}**")
         else:
-            choice = st.selectbox(f"{len(matches)} matches — pick one:", matches["title"].tolist())
+            choice = st.selectbox(f"{len(matches)} retro matches — select yours:", matches["title"].tolist())
             selected_id = int(matches[matches["title"] == choice]["movie_id"].values[0])
 
     if selected_id is not None:
-        with st.spinner("Computing recommendations..."):
+        with st.spinner("Spooling identical recommendation tape..."):
             recs = get_hybrid_recs(selected_id, ratings_matrix, movies_genres_set, movies, rating_stats)
-        st.subheader("Top 10 similar movies")
+        st.subheader("Top 10 similar favorites recommended for you")
         movie_cards(recs, api_key)
 
 # Tab 2 — User recommendations
 with tab2:
-    st.header("Personalized Recommendations")
-    st.caption("Movies you haven't seen, predicted from your rating history.")
+    st.header("Your Nostalgic Profile")
+    st.caption("Classic favorites you haven't seen yet, generated from your vintage taste records.")
 
-    user_id = st.number_input("User ID (1–610)", min_value=1, max_value=610, value=1, step=1)
+    user_id = st.number_input("Vintage User Profile (ID: 1–610)", min_value=1, max_value=610, value=1, step=1)
 
-    if st.button("Get recommendations", type="primary"):
+    if st.button("Generate recommendation spool", type="primary"):
         rated_df = (
             ratings[ratings["user_id"] == user_id]
             .merge(movies[["movie_id", "title"]], on="movie_id")
@@ -267,12 +280,14 @@ with tab2:
 
         col1, col2 = st.columns([1, 3])
         with col1:
-            st.markdown(f"**User {user_id}** rated **{len(rated_df)} movies**")
+            st.markdown(f"**Retro Archivist {user_id}**")
+            st.caption(f"Rated **{len(rated_df)} classic movies**")
+            st.markdown("### Top Rated:")
             for _, r in rated_df.sort_values("rating", ascending=False).head(5).iterrows():
                 st.markdown(f"{'⭐' * int(r['rating'])} {r['title']}")
 
         with col2:
-            with st.spinner("Finding recommendations..."):
+            with st.spinner("Rewinding recommendations tape..."):
                 user_recs = get_user_recs(
                     user_id, ratings_matrix, movies, rating_stats
                 )
@@ -280,20 +295,21 @@ with tab2:
 
 # Tab 3 — About
 with tab3:
-    st.header("How this works")
+    st.header("The Vintage Engine Blueprint")
     st.markdown("""
-    **Item-Based Collaborative Filtering**  
-    Builds a user-item rating matrix. Computes cosine similarity dynamically between items using optimized NumPy dot products — if users who liked Movie A also liked Movie B, they're marked similar.
+    Welcome to **RetroReel**! This application is purposely tuned to provide nostalgic recommendations using standard collaborative filtering math on the historic GroupLens data.
+    
+    ### 📼 Why only pre-2018 movies?
+    This site runs on the celebrated **MovieLens Latest Small** dataset, compiled in **September 2018**. Instead of clogging memory with modern databases, this platform celebrates the **Golden Age of Hollywood, 90s Blockbusters, and Nostalgic 2000s/2010s Hits**. 
 
-    **Content-Based Filtering**  
-    Each movie maps to a 20-dimensional binary genre vector. Dynamic dot-products on these vectors find movies in the same genre space.
-
-    **Hybrid (default)**  
-    60% collaborative + 40% content-based. Collaborative captures user behavior trends; content ensures structural alignment.
+    ### 🎞️ Recommendation Mathematics:
+    *   **Item-Based Collaborative Filtering**: Maps similar movies by analyzing how users jointly rated older releases. If vintage archivists who loved *Star Wars* also loved *The Empire Strikes Back*, a mathematical correlation is formed.
+    *   **Content-Based Modeling**: Maps similarity vectors over 20 distinct classic genres (like *Film-Noir*, *Musical*, *Sci-Fi*, and *IMAX*) to balance out ratings and find hidden thematic gems.
+    *   **Hybrid Blend**: Combined weighting (60% Collaborative + 40% Content) tuned for vintage accuracy.
 
     ---
-    **Stack:** Pandas · Scikit-learn · Streamlit · TMDB API · NumPy  
-    **Dataset:** MovieLens Latest (Small) — GroupLens Research, University of Minnesota
+    **Engine Stack:** Python · Pandas · Scikit-learn · Streamlit · TMDB API (Optional)  
+    **Archive Source:** MovieLens Latest (Small) — GroupLens Research, University of Minnesota
 
     Garv Rana · EE Undergrad · [DTU](https://dtu.ac.in) · [GitHub](https://github.com/garvranaaa) · [LinkedIn](https://linkedin.com/in/garvsanjeevrana)
     """)
