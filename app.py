@@ -69,14 +69,14 @@ def get_hybrid_recs(movie_id, ratings_matrix, movies_genres_set, movies, rating_
     if movie_id not in movies_genres_set.index:
         return pd.DataFrame()
 
-    movie_genre_vec = movies_genres_set.loc[movie_id].values.reshape(1, -1)
-    all_genre_vecs = movies_genres_set.values
+    movie_genre_vec = movies_genres_set.loc[movie_id].to_numpy().reshape(1, -1)
+    all_genre_vecs = movies_genres_set.to_numpy()
     content_sims = cosine_similarity(movie_genre_vec, all_genre_vecs).flatten()
     content = pd.Series(content_sims, index=movies_genres_set.index).drop(movie_id, errors='ignore')
     
     if movie_id in ratings_matrix.columns:
-        movie_collab_vec = ratings_matrix[movie_id].values.reshape(1, -1)
-        all_collab_vecs = ratings_matrix.values.T
+        movie_collab_vec = ratings_matrix[movie_id].to_numpy().reshape(1, -1)
+        all_collab_vecs = ratings_matrix.to_numpy().T
         collab_sims = cosine_similarity(movie_collab_vec, all_collab_vecs).flatten()
         collab = pd.Series(collab_sims, index=ratings_matrix.columns).drop(movie_id, errors='ignore')
     else:
@@ -130,11 +130,11 @@ def get_user_recs(ratings_dict, ratings_matrix, movies, rating_stats, n=10):
         return pd.DataFrame()
 
     # Optimized dynamic item-item calculations based on new user profile
-    rated_vectors = ratings_matrix[valid_rated_ids].values.T
-    unrated_vectors = ratings_matrix[unrated].values.T
+    rated_vectors = ratings_matrix[valid_rated_ids].to_numpy().T
+    unrated_vectors = ratings_matrix[unrated].to_numpy().T
     
     sim_matrix = cosine_similarity(rated_vectors, unrated_vectors)
-    ratings_arr = rated_series.values.reshape(-1, 1)
+    ratings_arr = rated_series.to_numpy().reshape(-1, 1)
     
     scores_arr = (sim_matrix * ratings_arr).sum(axis=0)
     sim_sums_arr = np.abs(sim_matrix).sum(axis=0) + 1e-8
